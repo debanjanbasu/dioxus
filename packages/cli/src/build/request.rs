@@ -316,8 +316,9 @@
 //! - xbuild: <https://github.com/rust-mobile/xbuild/blob/master/xbuild/src/command/build.rs>
 
 use crate::{
-    AndroidTools, BuildContext, DioxusConfig, Error, LinkAction, Platform, Result, RustcArgs,
-    TargetArgs, TraceSrc, WasmBindgen, WasmOptConfig, Workspace, DX_RUSTC_WRAPPER_ENV_VAR,
+    AndroidTools, BuildContext, DioxusConfig, Error, HotpatchModuleCache, LinkAction, Platform,
+    Result, RustcArgs, TargetArgs, TraceSrc, WasmBindgen, WasmOptConfig, Workspace,
+    DX_RUSTC_WRAPPER_ENV_VAR,
 };
 use anyhow::Context;
 use cargo_metadata::diagnostic::Diagnostic;
@@ -345,7 +346,6 @@ use tempfile::{NamedTempFile, TempDir};
 use tokio::{io::AsyncBufReadExt, process::Command};
 use toml_edit::Item;
 use uuid::Uuid;
-
 
 /// This struct is used to plan the build process.
 ///
@@ -3236,9 +3236,6 @@ impl BuildRequest {
                 return Err(anyhow::anyhow!("Failed to assemble apk: {output:?}").into());
             }
         }
-
-        // Codesigning for iOS and macOS
-        if let Platform::Ios | Platform::MacOS = self.platform {}
 
         Ok(())
     }
