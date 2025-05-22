@@ -346,7 +346,6 @@ use tokio::{io::AsyncBufReadExt, process::Command};
 use toml_edit::Item;
 use uuid::Uuid;
 
-use super::HotpatchModuleCache;
 
 /// This struct is used to plan the build process.
 ///
@@ -3237,6 +3236,9 @@ impl BuildRequest {
                 return Err(anyhow::anyhow!("Failed to assemble apk: {output:?}").into());
             }
         }
+
+        // Codesigning for iOS and macOS
+        if let Platform::Ios | Platform::MacOS = self.platform {}
 
         Ok(())
     }

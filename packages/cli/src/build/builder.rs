@@ -964,7 +964,7 @@ https://developer.apple.com/documentation/xcode/sharing-your-teams-signing-certi
 
         let profiles_folder = dirs::home_dir()
             .context("Your machine has no home-dir")?
-            .join("Library/MobileDevice/Provisioning Profiles");
+            .join("Library/Developer/Xcode/UserData/Provisioning Profiles");
 
         if !profiles_folder.exists() || profiles_folder.read_dir()?.next().is_none() {
             tracing::error!(
