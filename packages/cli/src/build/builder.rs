@@ -486,7 +486,16 @@ impl AppBuilder {
                 }
             }
 
-            Platform::Ios => self.open_ios_sim(envs).await?,
+            Platform::Ios => {
+                // Based on what's the value of the device flag, to open simulator or device
+                if self.build.device {
+                    self.open_ios_device().await?;
+                } else {
+                    // Do basic codesigning
+                    self.codesign_ios().await?;
+                    self.open_ios_sim(envs).await?;
+                }
+            }
 
             Platform::Android => {
                 self.open_android_sim(false, devserver_ip, envs).await?;
@@ -763,7 +772,7 @@ impl AppBuilder {
     }
 
     /// Use `xcrun` to install the app to the simulator
-    /// With simulators, we're free to basically do anything, so we don't need to do any fancy codesigning
+    /// With simulators, we're free to basically do anything, so we need to do a minimal codesigning
     /// or entitlements, or anything like that.
     ///
     /// However, if there's no simulator running, this *might* fail.
@@ -812,12 +821,10 @@ impl AppBuilder {
 
     /// We have this whole thing figured out, but we don't actually use it yet.
     ///
-    /// Launching on devices is more complicated and requires us to codesign the app, which we don't
-    /// currently do.
+    /// Launching on devices is more complicated and requires us to codesign the app.
     ///
     /// Converting these commands shouldn't be too hard, but device support would imply we need
     /// better support for codesigning and entitlements.
-    #[allow(unused)]
     async fn open_ios_device(&self) -> Result<()> {
         use serde_json::Value;
         let app_path = self.build.root_dir();
@@ -961,7 +968,6 @@ impl AppBuilder {
         unimplemented!("dioxus-cli doesn't support ios devices yet.")
     }
 
-    #[allow(unused)]
     async fn codesign_ios(&self) -> Result<()> {
         const CODESIGN_ERROR: &str = r#"This is likely because you haven't
 - Created a provisioning profile before
@@ -975,7 +981,8 @@ https://developer.apple.com/documentation/xcode/sharing-your-teams-signing-certi
 
         let profiles_folder = dirs::home_dir()
             .context("Your machine has no home-dir")?
-            .join("Library/MobileDevice/Provisioning Profiles");
+            // Refer to this change https://github.com/dotnet/macios/issues/20771
+            .join("Library/Developer/Xcode/UserData/Provisioning Profiles");
 
         if !profiles_folder.exists() || profiles_folder.read_dir()?.next().is_none() {
             tracing::error!(
