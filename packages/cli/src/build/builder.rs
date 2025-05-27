@@ -489,10 +489,11 @@ impl AppBuilder {
             Platform::Ios => {
                 // Based on what's the value of the device flag, to open simulator or device
                 if self.build.device {
+                    self.codesign_ios(true).await?;
                     self.open_ios_device().await?;
                 } else {
-                    // Do basic codesigning
-                    self.codesign_ios().await?;
+                    // The simulator can take environment variables to control the behavior of the app
+                    self.codesign_ios(false).await?;
                     self.open_ios_sim(envs).await?;
                 }
             }
@@ -858,7 +859,7 @@ impl AppBuilder {
         }
 
         async fn get_device_uuid() -> Result<String> {
-            let output = Command::new("xcrun")
+            Command::new("xcrun")
                 .args([
                     "devicectl",
                     "list",
@@ -964,11 +965,10 @@ impl AppBuilder {
 
             Ok(())
         }
-
-        unimplemented!("dioxus-cli doesn't support ios devices yet.")
+        Ok(())
     }
 
-    async fn codesign_ios(&self) -> Result<()> {
+    async fn codesign_ios(&self, device: bool) -> Result<()> {
         const CODESIGN_ERROR: &str = r#"This is likely because you haven't
 - Created a provisioning profile before
 - Accepted the Apple Developer Program License Agreement
