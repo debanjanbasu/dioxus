@@ -127,6 +127,8 @@ impl BuildRequest {
             compile_sdk: u32,
             compile_sdk_minor: Option<u32>,
             build_tools_version: Option<String>,
+            /// The jniLibs ABI directory this build stages its libraries into, e.g. "arm64-v8a"
+            abi: String,
             /// Android permission strings (e.g., "android.permission.CAMERA")
             permissions: Vec<String>,
             /// Android hardware features (e.g., "android.hardware.location.gps")
@@ -195,6 +197,7 @@ impl BuildRequest {
             build_tools_version: android_tools
                 .as_ref()
                 .and_then(|tools| tools.build_tools_version()),
+            abi: AndroidTools::android_jnilib(&self.triple).to_string(),
             permissions,
             features,
             raw_manifest,
