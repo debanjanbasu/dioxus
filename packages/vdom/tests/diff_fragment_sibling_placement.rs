@@ -60,37 +60,29 @@ fn earlier_sibling_nested_child_changes_template() {
 }
 
 #[test]
-fn deeply_nested_fragment_sibling_nested_child_changes_template() {
-    #[component]
-    fn Comp() -> Element {
-        rsx! { b {} }
-    }
-
-    // Wrap the changing nested fragment in an intermediate one-element fragment so the
-    // placement scan has to traverse `Fragment -> Fragment` via `dynamic_node_edge_element`,
-    // and nest the inserting sibling inside a deeper fragment chain (> 2 `DiffFrame` levels)
-    // so `PlacementResolver` also looks up an in-flight ancestor mount beyond immediate parent.
+fn deeply_nested_insert_after_earlier_sibling_grows() {
+    // The tree is `i {} {first} {second}`, where `second` wraps an inserting node in two
+    // vnodes whose templates never change. Every render flips between:
+    //
+    //   even generations: first = (empty), second = (empty)
+    //   odd generations:  first = p {},    second = span {}
     fn app() -> Element {
         let odd = generation() % 2 == 1;
 
-        let inner_changed = if odd {
-            rsx! { Comp {} }
-        } else {
-            rsx! { p {} }
-        };
-        let middle_fragment = rsx! { {std::iter::once(inner_changed)} };
-        let first = rsx! { {std::iter::once(middle_fragment)} };
-
-        let deep_inserted = rsx! {
+        let inserted = rsx! {
             if odd {
                 span {}
             }
         };
-        let second_inner = rsx! { {std::iter::once(deep_inserted)} };
-        let second = rsx! { {std::iter::once(second_inner)} };
+        let second = rsx! { {std::iter::once(inserted)} };
 
+        // `first` is diffed before `second`. Inserting `span` walks up two vnodes to the
+        // root, which is still mid-diff, so `first` has to be read in its new shape (`p`)
+        // rather than the committed empty one, or `span` lands right after `i`.
         rsx! {
-            div { {[first, second].into_iter()} }
+            i {}
+            {odd.then(|| rsx! { p {} }).into_iter()}
+            {std::iter::once(second)}
         }
     }
 
@@ -107,37 +99,39 @@ fn deeply_nested_fragment_sibling_nested_child_changes_template() {
 }
 
 #[test]
-fn deeply_nested_fragment_sibling_nested_child_changes_template_with_anchors() {
-    // In even generations the nested node has 0 anchors (empty fragment); in odd generations
-    // it has 3 static element roots. If `dynamic_node_edge_element` walks `nodes[i]` from an
-    // uncommitted ancestor VNode against `child_mounts[i]` after `child_mounts[i]` has already
-    // committed the new 3-root template (or vice versa when reversing), `find_element_in_roots`
-    // indexes `mount.slots` out of bounds and panics.
+fn insert_in_suspense_boundary_after_earlier_sibling_changes_template() {
+    #[component]
+    fn Comp() -> Element {
+        rsx! { b {} }
+    }
+
+    // The tree is `div { [first] SuspenseBoundary { [second] } }`. Every render flips between:
+    //
+    //   even generations: first = p {},    second = (empty)
+    //   odd generations:  first = Comp {}, second = span {}
     fn app() -> Element {
         let odd = generation() % 2 == 1;
 
-        let inner_changed = if odd {
-            rsx! {
-                p { "a" }
-                b { "b" }
-                i { "c" }
-            }
+        let first = if odd {
+            rsx! { Comp {} }
         } else {
-            rsx! {}
+            rsx! { p {} }
         };
-        let middle_fragment = rsx! { {std::iter::once(inner_changed)} };
-        let first = rsx! { {std::iter::once(middle_fragment)} };
 
-        let deep_inserted = rsx! {
-            if !odd {
+        let second = rsx! {
+            if odd {
                 span {}
             }
         };
-        let second_inner = rsx! { {std::iter::once(deep_inserted)} };
-        let second = rsx! { {std::iter::once(second_inner)} };
 
+        // The suspense boundary diffs its children without the outer diff frames, so
+        // inserting `span` scans `first` through the root's committed (old) vnode while
+        // `first`'s mount already holds the new template.
         rsx! {
-            div { {[first, second].into_iter()} }
+            div {
+                {std::iter::once(first)}
+                SuspenseBoundary { fallback: |_| rsx! {}, {std::iter::once(second)} }
+            }
         }
     }
 
