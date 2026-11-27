@@ -16,8 +16,8 @@ syn = { workspace = true, features = ["full", "extra-traits"] }
 convert_case = { workspace = true }
 
 [dev-dependencies]
-dioxus = { workspace = true }
-dioxus-stores = { workspace = true }
+dioxus = { path = "../dioxus" }
+dioxus-stores = { path = "../stores" }
 
 [lib]
 proc-macro = true

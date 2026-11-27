@@ -846,11 +846,7 @@ impl BuildRequest {
             );
         }
 
-        let target_dir = std::env::var("CARGO_TARGET_DIR")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| cargo_config.build.target_dir.clone())
-            .unwrap_or_else(|| workspace.workspace_root().join("target"));
+        let target_dir = workspace.target_dir.clone();
 
         // If the user provided a profile and wasm_split is enabled, we should check that LTO=true and debug=true
         if args.wasm_split {
@@ -1226,8 +1222,9 @@ impl BuildRequest {
     /// This might stop working if/when cargo stabilizes contents-based fingerprinting.
     ///
     /// `dx` compiles everything with `--target` which ends up with a structure like:
-    /// `target/<triple>/<profile>/.fingerprint/<package_name>-<hash>`, or with Cargo's newer
-    /// build-dir layout, `target/<triple>/<profile>/build/<package_name>/<hash>/fingerprint`
+    /// `target/<triple>/<profile>/.fingerprint/<package_name>-<hash>`, or with cargo's newer
+    /// build-dir layout, `target/<triple>/<profile>/build/<package_name>/<hash>/fingerprint`.
+    /// When `build.build-dir` is configured these live under that directory instead of `target`.
     ///
     /// Normally you can't rely on this structure (ie with `cargo build`) but the explicit
     /// target arg guarantees this will work.
@@ -1266,7 +1263,7 @@ impl BuildRequest {
 
         // Always bust the tip crate.
         let mut bust = HashSet::new();
-        bust.insert(self.package().name.clone());
+        bust.insert(self.tip_package_name());
 
         // Walk workspace deps of the tip crate. If we're missing cached args for any of
         // them, bust their fingerprint so the wrapper re-captures during this fat build.
@@ -1277,18 +1274,11 @@ impl BuildRequest {
 
         for dep_name in self.workspace_crate_dep_names() {
             if !scope_dir.join(format!("{dep_name}.lib.json")).exists() {
-                bust.insert(dep_name.replace('_', "-"));
                 bust.insert(dep_name);
             }
         }
 
-        Self::remove_cargo_fingerprints(
-            &self
-                .target_dir
-                .join(self.triple.to_string())
-                .join(&self.profile),
-            &bust,
-        );
+        remove_cargo_fingerprints(&self.cargo_profile_dir(), &bust);
 
         Ok(())
     }
@@ -2672,6 +2662,21 @@ impl BuildRequest {
         self.session_cache_dir.join(self.bundle.to_string())
     }
 
+    /// A folder name unique to this workspace when the target dir lives outside of it, e.g. a
+    /// target dir shared between projects or git worktrees. `None` for the default layout.
+    pub(crate) fn shared_target_scope(&self) -> Option<String> {
+        super::link::shared_target_scope(&self.target_dir, &self.workspace_dir())
+    }
+
+    /// A directory in the target dir for dx's own intermediate build files. Kept per-workspace
+    /// when the target dir is shared.
+    pub(crate) fn intermediate_dir(&self, name: &str) -> PathBuf {
+        match self.shared_target_scope() {
+            Some(scope) => self.target_dir.join("dx").join(scope).join(name),
+            None => self.target_dir.join(name),
+        }
+    }
+
     pub(crate) fn rustc_wrapper_args_dir(&self) -> PathBuf {
         self.target_dir.join("dx").join(".captured-args")
     }
@@ -2729,7 +2734,10 @@ impl BuildRequest {
     /// is "distributed" after building an application (configurable in the
     /// `Dioxus.toml`).
     fn internal_out_dir(&self) -> PathBuf {
-        let dir = self.target_dir.join("dx");
+        let mut dir = self.target_dir.join("dx");
+        if let Some(scope) = self.shared_target_scope() {
+            dir.push(scope);
+        }
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -2776,7 +2784,7 @@ impl BuildRequest {
 
     /// Get the type of executable we are compiling
     pub(crate) fn executable_type(&self) -> TargetKind {
-        self.crate_target.kind[0].clone()
+        self.crate_target.kind[0]
     }
 
     /// The application name. PascalCase version of the crate name by default.
@@ -3191,6 +3199,13 @@ impl BuildRequest {
             .collect()
     }
 
+    fn cargo_profile_dir(&self) -> PathBuf {
+        self.workspace
+            .build_dir
+            .join(self.triple.to_string())
+            .join(&self.profile)
+    }
+
     fn is_apple_target(&self) -> bool {
         matches!(
             self.triple.operating_system,
@@ -3239,80 +3254,43 @@ impl BuildRequest {
         deps
     }
 
-    /// Remove Cargo fingerprints for `bust` packages across both the legacy
-    /// `<profile>/.fingerprint/<pkg>-<hash>` layout and Cargo's v2 build-dir
-    /// `<profile>/build/<pkg>/<hash>/fingerprint` layout. Build-script execution units
-    /// (identified by a sibling `run` directory in v2) are preserved.
-    fn remove_cargo_fingerprints(profile_dir: &Path, bust: &HashSet<String>) {
-        let fingerprint_dir = profile_dir.join(".fingerprint");
-        for entry in std::fs::read_dir(&fingerprint_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            if let Some(fname) = entry.file_name().to_str() {
-                if let Some((name, _)) = fname.rsplit_once('-') {
-                    if bust.contains(name) {
-                        _ = std::fs::remove_dir_all(entry.path());
-                    }
-                }
-            }
-        }
-
-        let build_dir = profile_dir.join("build");
-        for pkg in bust {
-            for unit in std::fs::read_dir(build_dir.join(pkg))
-                .into_iter()
-                .flatten()
-                .flatten()
-            {
-                let unit_path = unit.path();
-                if !unit_path.join("run").exists() {
-                    _ = std::fs::remove_dir_all(unit_path.join("fingerprint"));
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::BuildRequest;
-    use std::collections::HashSet;
+    use super::*;
 
     #[test]
-    fn removes_v1_and_v2_cargo_fingerprints_except_build_script_runs() {
-        let temp = tempfile::tempdir().unwrap();
-        let profile_dir = temp.path().join("aarch64-apple-darwin/desktop-dev");
+    fn removes_fingerprints_in_both_cargo_layouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let paths = [
+            ".fingerprint/my-app-1111",
+            ".fingerprint/my-lib-2222",
+            ".fingerprint/other-3333",
+            "build/my-app/4444/fingerprint",
+            "build/my-app/4444/out",
+            "build/my-lib/5555/fingerprint",
+            "build/other/6666/fingerprint",
+            "build/my-app-7777/out",
+        ];
+        for path in paths {
+            std::fs::create_dir_all(dir.join(path)).unwrap();
+        }
 
-        // Legacy .fingerprint layout
-        let v1_tip = profile_dir.join(".fingerprint/app-1234abcd");
-        let v1_other = profile_dir.join(".fingerprint/other-5678ef90");
-        std::fs::create_dir_all(&v1_tip).unwrap();
-        std::fs::create_dir_all(&v1_other).unwrap();
+        let bust = HashSet::from(["my_app".to_string(), "my_lib".to_string()]);
+        remove_cargo_fingerprints(dir, &bust);
 
-        // Cargo v2 build-dir layout: bin unit (no `run` dir) vs build-script unit (has `run` dir)
-        let v2_bin_fp = profile_dir.join("build/app/a082cdc11624f007/fingerprint");
-        let v2_build_script_unit = profile_dir.join("build/app/26e52b3aafdefb69");
-        let v2_build_script_fp = v2_build_script_unit.join("fingerprint");
-        let v2_dep_fp = profile_dir.join("build/my-dep/03f4cc9e60f625c7/fingerprint");
-        std::fs::create_dir_all(&v2_bin_fp).unwrap();
-        std::fs::create_dir_all(&v2_build_script_fp).unwrap();
-        std::fs::create_dir_all(v2_build_script_unit.join("run")).unwrap();
-        std::fs::create_dir_all(&v2_dep_fp).unwrap();
-
-        let bust = HashSet::from([
-            "app".to_string(),
-            "my_dep".to_string(),
-            "my-dep".to_string(),
-        ]);
-        BuildRequest::remove_cargo_fingerprints(&profile_dir, &bust);
-
-        assert!(!v1_tip.exists());
-        assert!(v1_other.exists());
-        assert!(!v2_bin_fp.exists());
-        assert!(v2_build_script_fp.exists());
-        assert!(!v2_dep_fp.exists());
+        let remaining: Vec<_> = paths.iter().filter(|p| dir.join(p).exists()).collect();
+        assert_eq!(
+            remaining,
+            [
+                &".fingerprint/other-3333",
+                &"build/my-app/4444/out",
+                &"build/other/6666/fingerprint",
+                &"build/my-app-7777/out",
+            ]
+        );
     }
 
     #[cfg(unix)]
@@ -3350,5 +3328,30 @@ mod tests {
         let shared = dst.join("shared.txt");
         assert!(!shared.symlink_metadata().unwrap().is_symlink());
         assert_eq!(std::fs::read_to_string(shared).unwrap(), "shared");
+    }
+}
+
+/// Delete cargo's fingerprints for the given packages (underscore-normalized names) in a
+/// `<target>/<triple>/<profile>` dir, handling both the legacy `.fingerprint/<package>-<hash>`
+/// layout and the newer `build/<package>/<hash>/fingerprint` build-dir layout.
+fn remove_cargo_fingerprints(profile_dir: &Path, packages: &HashSet<String>) {
+    let read_dir = |dir: PathBuf| std::fs::read_dir(dir).into_iter().flatten().flatten();
+    let busted = |name: &str| packages.contains(&name.replace('-', "_"));
+
+    for entry in read_dir(profile_dir.join(".fingerprint")) {
+        let fname = entry.file_name();
+        if let Some((name, _)) = fname.to_str().and_then(|f| f.rsplit_once('-')) {
+            if busted(name) {
+                _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    for entry in read_dir(profile_dir.join("build")) {
+        if entry.file_name().to_str().is_some_and(busted) {
+            for unit in read_dir(entry.path()) {
+                _ = std::fs::remove_dir_all(unit.path().join("fingerprint"));
+            }
+        }
     }
 }
