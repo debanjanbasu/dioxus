@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/DioxusLabs/dioxus/"
 homepage = "https://dioxuslabs.com/learn/0.7/getting_started"
 keywords = ["dom", "ui", "gui", "react"]
-rust-version = "1.85.0"
+rust-version = "1.92.0"
 
 [dependencies]
 dioxus-vdom = { workspace = true, features = ["serialize"] }

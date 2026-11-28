@@ -11,6 +11,7 @@ use futures_util::{FutureExt, pin_mut};
 use std::{
     collections::{BTreeMap, HashMap},
     rc::Rc,
+    sync::Arc,
     task::Waker,
     time::Duration,
 };
@@ -560,10 +561,14 @@ impl App {
         // This means we don't need to poll the receiver on every tick - we just get the events as they come in
         // This is a bit more efficient than the previous implementation, but if someone else sets a handler, the
         // receiver will become inert.
-        muda::MenuEvent::set_event_handler(Some(move |t| {
+        let previous = muda::MenuEvent::set_event_handler(None);
+        _ = muda::MenuEvent::set_event_handler(Some(Arc::new(move |t| {
             // todo: should we unset the event handler when the app shuts down?
-            _ = receiver.send_event(UserWindowEvent::MudaMenuEvent(t));
-        }));
+            _ = receiver.send_event(UserWindowEvent::MudaMenuEvent(t.clone()));
+            if let Some(previous) = &previous {
+                previous(t);
+            }
+        })));
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -579,12 +584,16 @@ impl App {
             _ = receiver.send_event(UserWindowEvent::TrayIconEvent(t));
         }));
 
-        // for whatever reason they had to make it separate
+        // Tray menus share muda's global handler, so chain the menubar handler registered above.
         let receiver = self.app_context.proxy.clone();
-        tray_icon::menu::MenuEvent::set_event_handler(Some(move |t| {
+        let previous = tray_icon::menu::MenuEvent::set_event_handler(None);
+        _ = tray_icon::menu::MenuEvent::set_event_handler(Some(Arc::new(move |t| {
             // todo: should we unset the event handler when the app shuts down?
-            _ = receiver.send_event(UserWindowEvent::TrayMenuEvent(t));
-        }));
+            _ = receiver.send_event(UserWindowEvent::TrayMenuEvent(t.clone()));
+            if let Some(previous) = &previous {
+                previous(t);
+            }
+        })));
     }
 
     /// Do our best to preserve state about the window when the event loop is destroyed
